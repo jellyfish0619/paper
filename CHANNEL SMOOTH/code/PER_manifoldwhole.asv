@@ -1,0 +1,203 @@
+function [packetErrorRate_sumwhole,a_whole,ac_whole,infowhole]=PER_manifoldwhole(s) 
+
+NumTxAnts=4;
+NumSTS=4;
+NumStreams=4;
+seed=123;
+% Create a format configuration object for a 8-by-8 fVHT transmission
+cfgVHT = wlanVHTConfig;
+cfgVHT.ChannelBandwidth = 'CBW80'; % 80 MHz channel bandwidth
+cfgVHT.NumTransmitAntennas = NumTxAnts;    % 4 transmit antennas
+cfgVHT.NumSpaceTimeStreams = NumStreams;    % 1 space-time streams
+cfgVHT.APEPLength = 2000;          % APEP length in bytes
+cfgVHT.MCS = 7;                    % 256-QAM rate-5/6
+cfgVHT.ChannelCoding = 'BCC';      % Binary convolutional coding
+% Create and configure the channel
+tgacChannel = wlanTGaxChannel;
+tgacChannel.DelayProfile = 'Model-D';
+tgacChannel.NumReceiveAntennas = NumSTS;
+tgacChannel.TransmitReceiveDistance = 1; % Distance in meters for NLOS
+tgacChannel.ChannelBandwidth = cfgVHT.ChannelBandwidth;
+tgacChannel.NumTransmitAntennas = cfgVHT.NumTransmitAntennas;
+tgacChannel.RandomStream="mt19937ar with seed";
+tgacChannel.Seed=s;
+tgacChannel.LargeScaleFadingEffect = 'None';
+tgacChannel.NormalizeChannelOutputs = false;
+fs = wlanSampleRate(cfgVHT);
+% Get the OFDM info
+ofdmInfo = wlanVHTOFDMInfo('VHT-Data',cfgVHT);
+% Set the sampling rate of the channel
+snr = 30:2:40;
+maxNumErrors = 10;   % The maximum number of packet errors at an SNR point
+maxNumPackets =100; % The maximum number of packets at an SNR point
+a=zeros(242,1);
+infowhole=arrayDatastore(6);
+
+%不一样
+% release(tgacChannel);
+tgacChannel.SampleRate = fs;
+
+% Indices for accessing each field within the time-domain packet
+ind = wlanFieldIndices(cfgVHT);
+s = numel(snr);
+
+packetErrorRate_sumwhole=zeros(s,1);
+% packetErrorRate_sumrtr=zeros(s,1);
+% packetErrorRate_sumcg=zeros(s,1);
+% packetErrorRate_sumbfgs=zeros(s,1);
+% 
+% 
+% rtr=zeros(1,11);
+% bb=zeros(1,11);
+% cg=zeros(1,11);
+% bfgs=zeros(1,11);
+
+% 误码率测试
+
+for p=1:1  %控制测试的次数（轮数）
+    fprintf("第%d轮\n",p);
+%     探测信道
+
+    for i = 1:s  %控制SNR的大小的循环
+        packetSNR = snr(i)-10*log10(ofdmInfo.FFTLength/ofdmInfo.NumTones); %控制packetSNR，由i来控制
+        stream = RandStream("combRecursive",'seed',79);
+        stream.Substream = i;
+        RandStream.setGlobalStream(stream);
+%         探测信道的设置
+        vhtSound = cfgVHT;
+        vhtSound.APEPLength = 0; % NDP so no data
+        vhtSound.NumSpaceTimeStreams=NumTxAnts;
+        vhtSound.SpatialMapping = 'Direct'; % Each TxAnt carries a STS
+
+%         Generate sounding waveform
+        soundingPSDU = [];
+        tx_detect = wlanWaveformGenerator(soundingPSDU,vhtSound);
+        reset(tgacChannel);
+        rx_detect = tgacChannel([tx_detect; zeros(15,NumTxAnts)]);
+        %reset(tgacChannel);
+        rng(seed);
+        rx_detect = awgn(rx_detect,packetSNR);
+        tOff = wlanSymbolTimingEstimate(rx_detect(ind.LSTF(1):ind.LSIG(2),:),vhtSound.ChannelBandwidth);
+        vhtLLTFInd = wlanFieldIndices(vhtSound,'VHT-LTF');
+        vhtltf = rx_detect(tOff+(vhtLLTFInd(1):vhtLLTFInd(2)),:);
+        vhtltfDemod_test = wlanVHTLTFDemodulate(vhtltf,vhtSound);
+%         到此结束探测信道的设置
+%         探测信道估计
+        chanEstSound = wlanVHTLTFChannelEstimate(vhtltfDemod_test,vhtSound,5);%得到信道估计 
+        chanEstSound = vhtBeamformingRemoveCSD(chanEstSound, ...
+            vhtSound.ChannelBandwidth,vhtSound.NumSpaceTimeStreams);%移除影响
+
+
+                for p =1:242
+                 a(p)=trace(squeeze(chanEstSound(p,:,:))*squeeze(chanEstSound(p,:,:))');
+                end
+%    plot(a)
+%         获取信道估计矩阵的大小
+        [m, n, u] = size(chanEstSound);
+% 
+%         对平滑后的信道估计进行SVD分解
+        chanEstPerm = permute(chanEstSound,[3 2 1]); % Permute to Nr-by-Nt-by-Nst
+        [U,D,V] = pagesvd(chanEstPerm,'econ'); %SVD分解
+
+        tic
+        V_test=V;
+        [V_test,a_test, ac_test,Q_test]=smooth_test(V_test,chanEstSound);
+
+         V_whole=V;
+         [V_whole,ac_whole,a_whole,Q_whole,infobb]=smooth_manifoldswhole(V_test,chanEstSound,Q_test);
+         
+         infowhole=[infowhole,infobb];
+%          [infortr,infobb,infocg,infobfgs,V_rtr,V_cg,V_bfgs]=smooth_manifoldswholeiter(V_test,chanEstSound,Q_test);
+%          rtrc=[infortr.cost];
+%          rtr=average(rtr,rtrc);
+          
+%         bb=average(bb,bbc);
+%         cgc=[infocg.cost];
+%         cg=average(cg,cgc);
+%         bfgsc=[infobfgs.cost];
+%         bfgs=average(bfgs,bfgsc);
+% % 
+        T_whole=permute(V_whole(:,1:NumStreams,:),[3 2 1]);
+%         T_rtr=permute(V_rtr(:,:,:),[3 2 1]);
+%         T_cg=permute(V_cg(:,:,:),[3 2 1]);
+%         T_bfgs=permute(V_bfgs(:,:,:),[3 2 1]);
+% 
+        vhtBF_whole=cfgVHT;
+        vhtBF_whole.SpatialMapping = 'Custom';
+        vhtBF_whole.SpatialMappingMatrix = T_whole; 
+% 
+%       误码率的仿真(BB)
+        txPSDU=zeros(cfgVHT.PSDULength*8,1);
+        [numPacketErrors_whole,numPkt_whole]=PERTest(vhtBF_whole,txPSDU,tgacChannel,maxNumErrors,maxNumPackets,packetSNR,ind,fs);
+        packetErrorRate_whole(i)=numPacketErrors_whole/(numPkt_whole-1);
+        packetErrorRate_sumwhole(i)=packetErrorRate_sumwhole(i)+packetErrorRate_whole(i);
+        disp(['smooth-BF-whole:SNR ' num2str(snr(i)) ' completed after ' ...
+            num2str(numPkt_whole-1) ' packets, PER: ' ...
+            num2str(packetErrorRate_whole(i))]);%
+% 
+%        %RTR
+%         vhtBF_rtr=cfgVHT;
+%         vhtBF_rtr.SpatialMapping = 'Custom';
+%         vhtBF_rtr.SpatialMappingMatrix = T_rtr; 
+%         [numPacketErrors_rtr,numPkt_rtr]=PERTest(vhtBF_rtr,txPSDU,tgacChannel,maxNumErrors,maxNumPackets,packetSNR,ind,fs);
+%         packetErrorRate_rtr(i)=numPacketErrors_rtr/(numPkt_rtr-1);
+%         packetErrorRate_sumrtr(i)=packetErrorRate_sumrtr(i)+packetErrorRate_rtr(i);
+% 
+%        %CG
+%         vhtBF_cg=cfgVHT;
+%         vhtBF_cg.SpatialMapping = 'Custom';
+%         vhtBF_cg.SpatialMappingMatrix = T_cg; 
+%         [numPacketErrors_cg,numPkt_cg]=PERTest(vhtBF_cg,txPSDU,tgacChannel,maxNumErrors,maxNumPackets,packetSNR,ind,fs);
+%         packetErrorRate_cg(i)=numPacketErrors_cg/(numPkt_cg-1);
+%         packetErrorRate_sumcg(i)=packetErrorRate_sumcg(i)+packetErrorRate_cg(i);
+% 
+%        %BFGS
+%         vhtBF_bfgs=cfgVHT;
+%         vhtBF_bfgs.SpatialMapping = 'Custom';
+%         vhtBF_bfgs.SpatialMappingMatrix = T_bfgs; 
+%         [numPacketErrors_bfgs,numPkt_bfgs]=PERTest(vhtBF_bfgs,txPSDU,tgacChannel,maxNumErrors,maxNumPackets,packetSNR,ind,fs);
+%         packetErrorRate_bfgs(i)=numPacketErrors_bfgs/(numPkt_bfgs-1);
+%         packetErrorRate_sumbfgs(i)=packetErrorRate_sumbfgs(i)+packetErrorRate_bfgs(i);
+    end
+% 
+ end
+
+
+
+
+% rtr=rtr/6;
+% bb=bb/6;
+% cg=cg/6;
+% bfgs=bfgs/6;
+
+% save('F:\ku\manifold2\iter.mat')
+
+% figure;
+% set(gca,'Fontsize',16);
+% plot([infortr.iter], rtr, '-ok');
+% hold on;
+% plot([infobb.iter], bb,'-or');
+% hold on;
+% plot([infocg.iter], cg, '-og');
+% hold on;
+% plot([infobfgs.iter], bfgs,'-ob');
+% hold off
+% xlabel('Iteration number');
+% ylabel('Cost');
+% legend('Trust-regions','Barzilai-Borwein','Conjugate-gradient','BFGS');
+% set(gca,'fontsize',12,'YGrid','on');
+% % 
+% figure
+% set(gca,'Fontsize',16);
+% grid on; 
+% semilogy(snr,packetErrorRate_sumrtr,'-ok');
+% hold on
+% semilogy(snr,packetErrorRate_sumwhole,'-or');
+% hold on
+% semilogy(snr,packetErrorRate_sumcg,'-og');
+% hold on
+% semilogy(snr,packetErrorRate_sumbfgs,'-ob');
+% xlabel('SNR (dB)');
+% ylabel('PER');
+% legend('Trust-regions','Barzilai-Borwein','Conjugate-gradient','BFGS','Location','southwest');
+% set(gca,'fontsize',12,'YGrid','on');

@@ -1,0 +1,135 @@
+function [ packetErrorRate_sumtest,a_test,ac_test]=PER_test(s, maxNumErrors, maxNumPackets, snr, seed_s) 
+
+NumTxAnts=4;
+NumSTS=2;
+NumStreams=2;
+seed=seed_s;
+% Create a format configuration object for a 8-by-8 VHT transmission
+cfgVHT = wlanVHTConfig;
+cfgVHT.ChannelBandwidth = 'CBW80'; % 80 MHz channel bandwidth
+cfgVHT.NumTransmitAntennas = NumTxAnts;    % 4 transmit antennas
+cfgVHT.NumSpaceTimeStreams = NumStreams;    % 1 space-time streams
+cfgVHT.APEPLength = 2000;          % APEP length in bytes
+cfgVHT.MCS = 7;                    % 256-QAM rate-5/6
+cfgVHT.ChannelCoding = 'BCC';      % Binary convolutional coding hhhhh
+% Create and configure the channel
+tgacChannel = wlanTGaxChannel;
+tgacChannel.DelayProfile = 'Model-D';
+tgacChannel.NumReceiveAntennas = NumSTS;
+tgacChannel.TransmitReceiveDistance = 1; % Distance in meters for NLOS
+tgacChannel.ChannelBandwidth = cfgVHT.ChannelBandwidth;
+tgacChannel.NumTransmitAntennas = cfgVHT.NumTransmitAntennas;
+tgacChannel.RandomStream="mt19937ar with seed";
+tgacChannel.Seed=s;
+tgacChannel.LargeScaleFadingEffect = 'None';
+tgacChannel.NormalizeChannelOutputs = false;
+fs = wlanSampleRate(cfgVHT);
+% Get the OFDM info
+ofdmInfo = wlanVHTOFDMInfo('VHT-Data',cfgVHT);
+% Set the sampling rate of the channel
+%snr = 30:2:40;
+%maxNumErrors = 10;   % The maximum number of packet errors at an SNR point
+%maxNumPackets =100; % The maximum number of packets at an SNR point
+%不一样
+% release(tgacChannel);
+tgacChannel.SampleRate = fs;
+
+% Indices for accessing each field within the time-domain packet
+ind = wlanFieldIndices(cfgVHT);
+s = numel(snr);
+
+packetErrorRate_sumtest=zeros(s,1);
+
+%parfor i = 1:S % Use 'parfor' to speed up the simulation
+% stream = RandStream('combRecursive';
+
+
+% 误码率测试
+%
+for p=1:1  %控制测试的次数（轮数）
+    fprintf("第%d轮\n",p);
+%     探测信道
+
+    for i = 1:s  %控制SNR的大小的循环
+        packetSNR = snr(i)-10*log10(ofdmInfo.FFTLength/ofdmInfo.NumTones); %控制packetSNR，由i来控制
+        stream = RandStream("combRecursive",'Seed',79);
+        stream.Substream = i;
+        RandStream.setGlobalStream(stream);
+%         探测信道的设置
+        vhtSound = cfgVHT;
+        vhtSound.NumSpaceTimeStreams=NumTxAnts;
+        vhtSound.APEPLength = 0; % NDP so no data
+        vhtSound.SpatialMapping = 'Direct'; % Each TxAnt carries a STS
+
+%         Generate sounding waveform
+        soundingPSDU = [];
+        tx_detect = wlanWaveformGenerator(soundingPSDU,vhtSound);
+        reset(tgacChannel);
+        rx_detect = tgacChannel([tx_detect; zeros(15,NumTxAnts)]);
+        %reset(tgacChannel);
+         rng(seed);
+        rx_detect = awgn(rx_detect,packetSNR);
+        tOff = wlanSymbolTimingEstimate(rx_detect(ind.LSTF(1):ind.LSIG(2),:),vhtSound.ChannelBandwidth);
+        vhtLLTFInd = wlanFieldIndices(vhtSound,'VHT-LTF');
+        vhtltf = rx_detect(tOff+(vhtLLTFInd(1):vhtLLTFInd(2)),:);
+        vhtltfDemod_test = wlanVHTLTFDemodulate(vhtltf,vhtSound);
+%         到此结束探测信道的设置
+%         探测信道估计
+        chanEstSound = wlanVHTLTFChannelEstimate(vhtltfDemod_test,vhtSound,5);%得到信道估计 
+        chanEstSound = vhtBeamformingRemoveCSD(chanEstSound, ...
+            vhtSound.ChannelBandwidth,vhtSound.NumSpaceTimeStreams);%移除影响
+
+%         获取信道估计矩阵的大小
+        [m, n, u] = size(chanEstSound);
+
+
+%         对平滑后的信道估计进行SVD分解
+        chanEstPerm = permute(chanEstSound,[3 2 1]); % Permute to Nr-by-Nt-by-Nst
+        [U,D,V] = pagesvd(chanEstPerm,'econ'); %SVD分解
+
+%         chanEstPerm_c = permute(filtered_estimation,[3 2 1]); % Permute to Nr-by-Nt-by-Nst
+%         [U_c,D_c,V_c] = pagesvd(chanEstPerm_c,'econ'); %SVD分解
+%         V=permute(V(:,1:NumStreams,:),[3 2 1]);
+        
+        tic
+        V_test=V;
+        [V_test,a_test, ac_test]=smooth_test(V_test,chanEstSound);
+
+
+
+%     得出转向矩阵T
+
+%         T_test = Turn(V_test,NumSTS); % Permute to Nst-by-Nsts-by-Nt
+        T_test = permute(V_test(:,1:NumStreams,:),[3 2 1]); % Permute to Nst-by-Nsts-by-Nt
+
+
+%         原文中的办法
+
+        vhtBF_test=cfgVHT;
+        vhtBF_test.SpatialMapping = 'Custom';
+        vhtBF_test.SpatialMappingMatrix = T_test; 
+
+%         误码率的仿真
+
+        txPSDU=zeros(cfgVHT.PSDULength*8,1);
+
+ [numPacketErrors_test,numPkt_test]=PERTest(vhtBF_test,txPSDU,tgacChannel,maxNumErrors,maxNumPackets,packetSNR,ind,fs);
+
+
+
+        packetErrorRate_test(i)=numPacketErrors_test/(numPkt_test-1);
+
+
+
+        packetErrorRate_sumtest(i)=packetErrorRate_sumtest(i)+packetErrorRate_test(i);
+  
+
+        disp(['smooth-BF-test:SNR ' num2str(snr(i)) ' completed after ' ...
+            num2str(numPkt_test-1) ' packets, PER: ' ...
+            num2str(packetErrorRate_test(i))]);
+
+
+    end
+
+end
+

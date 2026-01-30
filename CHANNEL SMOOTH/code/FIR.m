@@ -1,0 +1,23 @@
+
+function [x_opt]= FIR(chanEstSound,k,l)
+H = chanEstSound(:,k,l)';% 输入数据 H，具体的值请根据您的实际情况填写
+H=[0,0,H,0,0];
+A = []; % 初始化 A 矩阵
+for s = 3:244
+    A_s = [H(s-2), H(s-1), H(s), H(s+1), H(s+2)];
+    A = [A;A_s];
+end
+
+% 定义目标函数
+objective = @(x) sum(vecnorm(A*x - H(3:244)).^2);
+
+% 初始化变量
+x0 = zeros(5, 1); % 变量 x 的初始值
+
+% 定义约束条件
+
+% 求解最优化问题
+options = optimoptions('fmincon', 'Display', 'off','OptimalityTolerance', 1e-10); % 设置优化选项
+[x_opt, fval] = fmincon(objective, x0, [], [], [], [], [], [], [], options);
+a=x_opt;
+
